@@ -103,6 +103,19 @@ def telecharger(lien, on_progress=None):
                 recu += len(morceau)
                 if on_progress:
                     on_progress(recu, total)
+            # Ecrire jusqu'au disque : le fichier va etre lance aussitot.
+            sortie.flush()
+            os.fsync(sortie.fileno())
+
+    # Un telechargement interrompu garde son en-tete et passerait la
+    # verification suivante ; c'est la TAILLE qui le trahit.
+    if total and recu != total:
+        try:
+            os.remove(cible)
+        except OSError:
+            pass
+        raise ValueError("telechargement incomplet : %d octets sur %d"
+                         % (recu, total))
 
     # Un executable PyInstaller commence par l'en-tete MZ : un fichier
     # tronque ou une page d'erreur HTML seraient sinon installes tels quels.
@@ -121,6 +134,10 @@ def telecharger(lien, on_progress=None):
 
 _RELAIS = r'''
 $ErrorActionPreference = 'SilentlyContinue'
+$journal = Join-Path $env:TEMP 'ollook-maj.log'
+function Note($m) { "$(Get-Date -Format o)  $m" | Add-Content -LiteralPath $journal }
+
+Note "relais demarre, attente du PID $env:OLLOOK_PID"
 
 # Attendre la fermeture d'Ollook : un executable en cours ne peut pas etre
 # remplace tant qu'il tient le fichier.
@@ -129,12 +146,38 @@ while ((Get-Date) -lt $fin) {
     if (-not (Get-Process -Id $env:OLLOOK_PID)) { break }
     Start-Sleep -Milliseconds 300
 }
-Start-Sleep -Milliseconds 400
+Start-Sleep -Milliseconds 500
 
+$attendu = (Get-Item -LiteralPath $env:OLLOOK_NOUVEAU).Length
 Move-Item -LiteralPath $env:OLLOOK_NOUVEAU -Destination $env:OLLOOK_CIBLE -Force
-if ($?) {
-    Start-Process -FilePath $env:OLLOOK_CIBLE -WorkingDirectory (Split-Path $env:OLLOOK_CIBLE)
+if (-not $?) { Note "echec du remplacement"; exit 1 }
+
+$obtenu = (Get-Item -LiteralPath $env:OLLOOK_CIBLE).Length
+Note "remplace : $obtenu octets sur $attendu attendus"
+if ($obtenu -ne $attendu) { Note "taille incoherente, on n abandonne pas mais on signale" }
+
+# Laisser l'antivirus analyser les megaoctets fraichement ecrits. Lance trop
+# tot, l'executable echoue a extraire son contenu et se plaint de ne pas
+# trouver python3xx.dll -- alors que le fichier est parfaitement valide.
+Start-Sleep -Seconds 3
+
+$lance = Start-Process -FilePath $env:OLLOOK_CIBLE `
+                       -WorkingDirectory (Split-Path $env:OLLOOK_CIBLE) -PassThru
+# Un echec d'extraction tue le processus en une seconde environ ; au-dela,
+# une disparition signifie plutot que l'utilisateur a ferme la fenetre.
+Start-Sleep -Milliseconds 2500
+
+# Une seconde tentative est sans risque : Ollook n'admet qu'une instance,
+# un lancement de trop se contente de reveiller celle qui tourne.
+if (-not $lance -or -not (Get-Process -Id $lance.Id)) {
+    Note "premier demarrage echoue, seconde tentative"
+    Start-Sleep -Seconds 3
+    Start-Process -FilePath $env:OLLOOK_CIBLE `
+                  -WorkingDirectory (Split-Path $env:OLLOOK_CIBLE)
+} else {
+    Note "demarrage confirme, PID $($lance.Id)"
 }
+
 Remove-Item -LiteralPath $PSCommandPath -Force
 '''
 

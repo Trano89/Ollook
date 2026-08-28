@@ -195,6 +195,12 @@ Ce qui n'est jamais automatique, c'est le **moment** :
 - jamais sans un avis de dix secondes, avec un bouton *Plus tard* qui reporte au prochain
   démarrage.
 
+Le remplacement est prudent : le téléchargement est refusé s'il est incomplet — un
+fichier tronqué garde son en-tête et passerait un contrôle naïf — la taille est vérifiée
+après l'échange, et le lancement attend que l'antivirus ait fini d'analyser les mégaoctets
+fraîchement écrits. Sans cette attente, l'exécutable échoue à extraire son contenu et se
+plaint de ne pas trouver `python3xx.dll`, alors que le fichier est parfaitement valide.
+
 L'avis propose de décocher l'automatisme si vous préférez décider vous-même. L'échec de la
 vérification — hors ligne, quota d'API — est silencieux : une mise à jour ne doit jamais
 empêcher d'écrire un courriel.
