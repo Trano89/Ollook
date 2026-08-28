@@ -97,9 +97,15 @@ def telecharger(lien, on_progress=None):
     # Un executable PyInstaller commence par l'en-tete MZ : un fichier
     # tronque ou une page d'erreur HTML seraient sinon installes tels quels.
     with open(cible, "rb") as f:
-        if f.read(2) != b"MZ":
+        entete = f.read(2)
+    # Suppression APRES fermeture : Windows refuse d'effacer un fichier ouvert,
+    # et l'erreur masquerait le vrai motif du rejet.
+    if entete != b"MZ":
+        try:
             os.remove(cible)
-            raise ValueError("le fichier telecharge n'est pas un executable")
+        except OSError:
+            pass
+        raise ValueError("le fichier telecharge n'est pas un executable")
     return cible
 
 

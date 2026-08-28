@@ -67,8 +67,13 @@ dossier est en lecture seule, il bascule sur `%APPDATA%`.
 
 Ollook a besoin d'[Ollama](https://ollama.com) pour faire tourner le modèle. **Il s'en
 occupe** : au premier lancement, un assistant propose de l'installer, de le démarrer, et
-de télécharger `gemma4:12b` (7,6 Go). Rien n'est téléchargé sans votre accord, et les
-tailles sont annoncées.
+de télécharger un modèle. Rien n'est téléchargé sans votre accord, et les tailles sont
+annoncées.
+
+**Ollook détecte votre carte graphique** et présélectionne la variante de Qwen 3.5 la plus
+capable qui y tienne — de `qwen3.5:2b` (2,7 Go) à `qwen3.5:35b` (24 Go). Vous gardez la
+main sur le choix ; l'assistant indique la mémoire nécessaire pour chacune et avertit si
+elle dépasse celle de votre carte.
 
 ### 3. Un bouton dans Outlook (facultatif)
 
@@ -160,12 +165,19 @@ un modèle qui suit correctement des consignes.
 | 7 à 14 Md | correct dans la plupart des cas |
 | **< 4 Md** | corrige l'orthographe mais **ignore souvent le registre** |
 
-C'est pourquoi le modèle installé par défaut est `gemma4:12b` et non un `e2b` ou `e4b` :
-en dessous d'environ quatre milliards de paramètres, le tutoiement ne passe pas, ce qui
-vide l'outil de son intérêt.
+L'assistant en tient compte : il ne présélectionne jamais une variante trop petite quand
+la carte permet mieux, et signale que le registre passera mal sur les plus légères.
+
+| Carte | Modèle présélectionné |
+|---|---|
+| 28 Go et plus | `qwen3.5:35b` |
+| 20 à 27 Go | `qwen3.5:27b` |
+| 8 à 19 Go | `qwen3.5:9b` |
+| 4 à 7 Go | `qwen3.5:4b` |
+| moins de 4 Go | `qwen3.5:2b` |
 
 ```bash
-ollama pull gemma4:12b
+ollama pull qwen3.5:9b
 ```
 
 ---
@@ -251,7 +263,7 @@ console).
 | Symptôme | Solution |
 |---|---|
 | « Ollama arrêté » | `ollama serve` |
-| « Aucun modèle installé » | `ollama pull gemma4:12b` |
+| « Aucun modèle installé » | `ollama pull qwen3.5:9b` |
 | `Ctrl+Alt+R` sans effet | le raccourci est pris par une autre application ; la fenêtre le signale au démarrage |
 | Le texte n'est pas remplacé | le message a changé depuis la capture ; il est dans le presse-papiers, collez-le |
 | `tkinter` introuvable | Windows : réinstallez Python en cochant *tcl/tk and IDLE*. macOS : `brew install python-tk` |
