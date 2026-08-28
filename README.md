@@ -117,6 +117,13 @@ Deux sécurités : avant de remplacer, Ollook relit la plage et vérifie qu'elle
 toujours votre brouillon ; en cas d'échec, il ne se rabat jamais sur un collage intégral
 qui abîmerait la mise en forme — il vous le dit et laisse le texte dans le presse-papiers.
 
+### Nouvel Outlook
+
+Le nouvel Outlook (`olk.exe`) n'expose aucun modèle objet : Ollook y passe par le
+presse-papiers, et le remplacement se fait par sélection de paragraphes plutôt que par
+plage de caractères. La signature et le fil cité sont toujours détectés et préservés,
+mais le remplacement est un cran moins précis qu'avec Outlook classique.
+
 ### Ailleurs que dans Outlook
 
 Sélectionnez votre texte, `Ctrl+Alt+R`, choisissez **Ma sélection**. Fonctionne dans un

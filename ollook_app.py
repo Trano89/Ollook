@@ -768,7 +768,12 @@ class App(object):
         # Voie exacte : lire le corps par le modele objet d'Outlook. Elle donne
         # des positions de caracteres utilisables pour un remplacement
         # chirurgical, la ou le presse-papiers ne donne que du texte.
-        if self.scope.get() == "all" and outlook is not None:
+        #
+        # Reservee a Outlook CLASSIQUE : le nouvel Outlook (olk.exe) n'expose
+        # aucun modele objet, et l'essayer quand meme coute une seconde de
+        # PowerShell a chaque capture, pour rien.
+        if (self.scope.get() == "all" and outlook is not None
+                and self.bridge.process_name(hwnd) == "outlook.exe"):
             self.root.update()
             if self.bridge.focus(hwnd):          # ActiveInspector = cette fenetre
                 corps = outlook.lire_corps()

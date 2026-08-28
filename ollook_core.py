@@ -37,7 +37,7 @@ REGLES ABSOLUES, sans exception :
 5. Tu respectes le decoupage en paragraphes et les listes a puces existantes. Tu ne peux ajouter un paragraphe que si le niveau de developpement demande ci-dessous le justifie.
 6. Tu ne commentes pas, tu n'expliques pas tes changements, tu ne poses aucune question, tu n'ajoutes aucun titre.
 7. Tu n'ecris JAMAIS de forme parenthesee du type "certain(e)", "pret(e)", "informe(e)". Quand le genre de l'auteur est inconnu, tu tournes la phrase autrement pour eviter l'accord : "je n'ai pas encore de certitude" plutot que "je ne suis pas certain(e)".
-7. Ta reponse contient EXCLUSIVEMENT le texte reecrit : pas de guillemets englobants, pas de balises, pas de markdown, pas de bloc de code, pas de phrase d'introduction du type "Voici".
+8. Ta reponse contient EXCLUSIVEMENT le texte reecrit : pas de guillemets englobants, pas de balises, pas de markdown, pas de bloc de code, pas de phrase d'introduction du type "Voici".
 
 Si <a_reecrire> est vide ou ne contient pas de message, renvoie exactement : (rien a reecrire)"""
 
@@ -375,6 +375,31 @@ def _blocks(lines):
     return out
 
 
+def _signature_sans_bloc(lines, draft):
+    """Cherche une signature dans un texte sans aucune ligne vide.
+
+    On remonte depuis la derniere ligne tant qu'elles ressemblent a des
+    coordonnees, et on s'arrete des la premiere phrase. Il faut au moins un
+    indice fort -- telephone, courriel, adresse -- et une ligne de corps
+    restante, sans quoi on prefere ne rien detecter."""
+    debut = len(lines)
+    while debut > 0 and _looks_like_contact(lines[debut - 1]):
+        debut -= 1
+
+    bloc = [l for l in lines[debut:] if l.strip()]
+    if debut == 0 or len(bloc) < 2:
+        return draft.rstrip(), ""
+    if not any(_is_strong_signal(l) for l in bloc):
+        return draft.rstrip(), ""
+    if len(bloc) > 12:                     # au-dela, ce n'est plus une signature
+        return draft.rstrip(), ""
+
+    corps = "\n".join(lines[:debut]).rstrip()
+    if not corps.strip():
+        return draft.rstrip(), ""
+    return corps, "\n".join(lines[debut:]).strip("\n")
+
+
 def split_signature(draft):
     """Renvoie (corps, signature). La signature est vide si rien n'est sur."""
     lines = draft.split("\n")
@@ -390,8 +415,12 @@ def split_signature(draft):
     # 2. Blocs terminaux : on remonte tant qu'ils ressemblent a des
     #    coordonnees ou a un nom, et on s'arrete des la premiere prose.
     blocks = _blocks(lines)
-    if len(blocks) < 2:      # il faut au moins un bloc de corps a preserver
-        return draft.rstrip(), ""
+    if len(blocks) < 2:
+        # Aucune ligne vide : le decoupage par blocs ne donne rien. On remonte
+        # alors ligne a ligne depuis la fin, en s'arretant a la premiere phrase.
+        # Certaines signatures, notamment dans le nouvel Outlook, ne sont pas
+        # separees du message par une ligne vide.
+        return _signature_sans_bloc(lines, draft)
 
     start = None
     strong = False
@@ -445,11 +474,37 @@ def split_plain_text(text):
     return (text or "").strip(), ""
 
 
+# Tout ce qui vaut fin de ligne selon la provenance du texte. Le
+# presse-papiers d'un editeur web -- le nouvel Outlook en est un -- peut
+# rendre des retours chariot seuls ou des separateurs de ligne Unicode.
+# Sans normalisation, le message entier tient sur une seule ligne : plus de
+# paragraphes, donc plus de blocs, donc aucune signature detectee.
+_RUPTURES = (
+    '\r\n',        # Windows
+    '\u2028',   # separateur de ligne Unicode
+    '\u2029',   # separateur de paragraphe Unicode
+    '\x85',     # prochaine ligne
+    '\r',          # retour chariot seul
+    '\x0b',     # rupture de ligne Word, un <br>
+    '\x0c',     # saut de page
+)
+
+
+def normaliser_lignes(texte):
+    """Ramene toutes les fins de ligne a un simple saut de ligne."""
+    if not texte:
+        return ""
+    for rupture in _RUPTURES:
+        texte = texte.replace(rupture, "\n")
+    return texte
+
+
 def split_message(text):
     """Decoupe un texte brut en (brouillon, signature, fil_cite).
 
     Seul le brouillon est soumis au modele ; la signature et le fil cite sont
     conserves tels quels et remis en place par join_message()."""
+    text = normaliser_lignes(text)
     draft, context = split_plain_text(text)
     body, signature = split_signature(draft)
     return body, signature, context
