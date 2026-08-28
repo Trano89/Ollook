@@ -211,3 +211,65 @@ def remplacer_debut(fin, texte, temoin):
                 os.remove(reste)
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------
+# Signatures configurees dans Outlook classique
+#
+# Outlook y depose trois formats par signature ; le .txt est la version texte
+# brut, celle qui se compare au corps du message. Connaitre la vraie signature
+# rend la frontiere du brouillon EXACTE, la ou l'heuristique doit deviner.
+#
+# Le nouvel Outlook, lui, ne depose rien : ses signatures vivent dans la boite
+# aux lettres. Le dossier est alors vide et l'appelant retombe sur l'heuristique.
+# --------------------------------------------------------------------------
+
+def dossier_signatures():
+    base = os.environ.get("APPDATA")
+    return os.path.join(base, "Microsoft", "Signatures") if base else None
+
+
+def _decoder(brut):
+    """Les fichiers sont en UTF-16 avec marque d'ordre des octets."""
+    for encodage in ("utf-16", "utf-8-sig", "cp1252"):
+        try:
+            texte = brut.decode(encodage)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if "\x00" not in texte:
+            return texte
+    return ""
+
+
+def signatures_connues():
+    """Textes des signatures deposees par Outlook, la plus longue d'abord.
+
+    On les essaie toutes plutot que de consulter le registre pour savoir
+    laquelle appartient a quel compte : c'est plus court, et cela couvre les
+    profils a plusieurs comptes sans risque de se tromper de correspondance."""
+    dossier = dossier_signatures()
+    if not dossier or not os.path.isdir(dossier):
+        return []
+
+    textes = []
+    try:
+        noms = os.listdir(dossier)
+    except OSError:
+        return []
+
+    for nom in noms:
+        if not nom.lower().endswith(".txt"):
+            continue
+        try:
+            with open(os.path.join(dossier, nom), "rb") as f:
+                brut = f.read()
+        except OSError:
+            continue
+        texte = _decoder(brut).strip()
+        if texte:
+            textes.append(texte)
+
+    # La plus longue d'abord : entre deux signatures dont l'une est le prefixe
+    # de l'autre, on veut reconnaitre la plus complete.
+    textes.sort(key=len, reverse=True)
+    return textes

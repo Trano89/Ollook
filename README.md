@@ -113,16 +113,31 @@ caractères de votre brouillon**. Il ne pilote pas Outlook au clavier : il passe
 modèle objet et remplace une plage exacte. Signature et fil cité conservent leur mise en
 forme d'origine — gras, couleurs, liens, indentation.
 
+Sur Outlook classique, Ollook lit en plus **votre signature réelle** dans
+`%APPDATA%\Microsoft\Signatures` : la frontière du brouillon devient exacte, sans aucune
+heuristique. Quand ce fichier n'existe pas — nouvel Outlook, signatures itinérantes, autre
+client — la détection par indices reprend la main.
+
 Deux sécurités : avant de remplacer, Ollook relit la plage et vérifie qu'elle contient
 toujours votre brouillon ; en cas d'échec, il ne se rabat jamais sur un collage intégral
 qui abîmerait la mise en forme — il vous le dit et laisse le texte dans le presse-papiers.
 
-### Nouvel Outlook
+### Nouvel Outlook : copier-coller manuel
 
-Le nouvel Outlook (`olk.exe`) n'expose aucun modèle objet : Ollook y passe par le
-presse-papiers, et le remplacement se fait par sélection de paragraphes plutôt que par
-plage de caractères. La signature et le fil cité sont toujours détectés et préservés,
-mais le remplacement est un cran moins précis qu'avec Outlook classique.
+Le nouvel Outlook (`olk.exe`) est une WebView. **Les frappes synthétiques n'y parviennent
+pas** — vérifié de quatre façons, y compris en donnant le focus au composant de rendu
+interne : le presse-papiers reste rigoureusement inchangé. Ollook ne peut donc ni capturer
+ni remplacer tout seul.
+
+Plutôt que de réécrire à l'aveugle ce qui traînait dans le presse-papiers, Ollook le dit et
+vous rend la main :
+
+1. sélectionnez votre texte dans le message et copiez-le (`Ctrl+C`) ;
+2. **Réécrire** ;
+3. collez le résultat (`Ctrl+V`).
+
+Vos vraies frappes, elles, atteignent bien la WebView. La signature et le fil cité restent
+détectés et restitués.
 
 ### Ailleurs que dans Outlook
 

@@ -346,6 +346,11 @@ def _is_strong_signal(line):
 
 def _looks_like_contact(line):
     s = line.strip()
+    if not s:
+        # Une ligne vide ne tranche rien : elle sera ignoree par l'appelant.
+        # Sans ce cas, le test de ponctuation finale plus bas indexerait une
+        # chaine vide -- ce qui arrivait des que le brouillon etait vide.
+        return True
     if len(s) > 70:
         return False
     if _is_strong_signal(s):
@@ -400,8 +405,67 @@ def _signature_sans_bloc(lines, draft):
     return corps, "\n".join(lines[debut:]).strip("\n")
 
 
-def split_signature(draft):
+def _index_normalise(texte):
+    """Renvoie (texte comparable, positions d'origine).
+
+    Les espaces sont ramenes a un seul et la casse ignoree : les signatures
+    Outlook contiennent des espaces insecables la ou le corps du message peut
+    en avoir de simples, et une comparaison litterale echouerait dessus."""
+    sortie = []
+    positions = []
+    en_espace = True
+    for i, c in enumerate(texte):
+        if c.isspace():
+            if not en_espace:
+                sortie.append(" ")
+                positions.append(i)
+                en_espace = True
+        else:
+            sortie.append(c.lower())
+            positions.append(i)
+            en_espace = False
+    return "".join(sortie), positions
+
+
+def _chercher_signature(draft, connue):
+    """Position de depart de `connue` dans `draft`, ou None.
+
+    On cherche un prefixe de la signature plutot que son texte entier : le
+    rendu HTML du courriel peut differer du fichier .txt sur les dernieres
+    lignes -- ligne vide finale, espace insecable de fin."""
+    comparable, positions = _index_normalise(draft)
+    aiguille, _ = _index_normalise(connue)
+    aiguille = aiguille.strip()
+    if len(aiguille) < 12:
+        return None
+
+    # Du prefixe le plus long au plus court, sans descendre sous ce qui
+    # resterait ambigu.
+    for longueur in (len(aiguille), 120, 80, 50, 30):
+        if longueur > len(aiguille):
+            continue
+        morceau = aiguille[:longueur].strip()
+        if len(morceau) < 25:
+            break
+        trouve = comparable.find(morceau)
+        if trouve >= 0:
+            return positions[trouve]
+    return None
+
+
+def split_signature(draft, connues=None):
     """Renvoie (corps, signature). La signature est vide si rien n'est sur."""
+    # 0. Signature reellement configuree dans Outlook : la frontiere est alors
+    #    exacte, plus aucune heuristique n'intervient.
+    for connue in (connues or []):
+        depart = _chercher_signature(draft, connue)
+        if depart is not None:
+            # Une position nulle est un resultat valable : le message ne
+            # contient que la signature, il n'y a donc rien a relire. La
+            # refuser ferait retomber sur l'heuristique, qui decouperait la
+            # signature en deux et en reecrirait la premiere moitie.
+            return draft[:depart].rstrip(), draft[depart:].strip("\n")
+
     lines = draft.split("\n")
 
     # 1. Delimiteur explicite : "-- " ou une ligne de tirets.
@@ -499,14 +563,14 @@ def normaliser_lignes(texte):
     return texte
 
 
-def split_message(text):
+def split_message(text, connues=None):
     """Decoupe un texte brut en (brouillon, signature, fil_cite).
 
     Seul le brouillon est soumis au modele ; la signature et le fil cite sont
     conserves tels quels et remis en place par join_message()."""
     text = normaliser_lignes(text)
     draft, context = split_plain_text(text)
-    body, signature = split_signature(draft)
+    body, signature = split_signature(draft, connues)
     return body, signature, context
 
 

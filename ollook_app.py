@@ -495,6 +495,12 @@ class App(object):
         self.maj_info = None       # publication detectee
         self.maj_chemin = None     # executable telecharge, pret a remplacer
         self.maj_avis = None       # fenetre d'avis, si affichee
+        # Le nouvel Outlook n'accepte aucune frappe synthetique : on n'y
+        # capture et n'y remplace rien soi-meme, l'utilisateur copie et colle.
+        self.manuel = False
+        # Signatures reellement configurees dans Outlook classique. Les
+        # connaitre rend la frontiere du brouillon exacte.
+        self.signatures = outlook.signatures_connues() if outlook else []
 
         self.root = tk.Tk()
         self.root.title(APP_NAME)
@@ -765,6 +771,20 @@ class App(object):
             self.refresh_windows(keep=False)
             return False, "Cette fenêtre n'existe plus. La liste a été rafraîchie."
 
+        # Le nouvel Outlook est une WebView : les frappes synthetiques n'y
+        # parviennent pas, meme en donnant le focus au composant de rendu.
+        # Envoyer Ctrl+A puis Ctrl+C y laisserait le presse-papiers
+        # inchange, et Ollook reecrirait ce qui s'y trouvait deja -- donc
+        # n'importe quoi. On demande plutot a l'utilisateur de copier.
+        if self.bridge.process_name(hwnd) == "olk.exe":
+            self._absorb(clipboard_get(self.root))
+            self.manuel = True
+            if not self.draft.strip():
+                return False, ("Le nouvel Outlook n'autorise pas la capture "
+                               "automatique. Sélectionnez votre texte, copiez-le "
+                               "(Ctrl+C), puis cliquez sur Réécrire.")
+            return True, ""
+
         # Voie exacte : lire le corps par le modele objet d'Outlook. Elle donne
         # des positions de caracteres utilisables pour un remplacement
         # chirurgical, la ou le presse-papiers ne donne que du texte.
@@ -779,6 +799,7 @@ class App(object):
                 corps = outlook.lire_corps()
                 if corps and corps.strip():
                     self._absorb(corps)
+                    self.manuel = False
                     self._stay_on_top()
                     if not self.draft.strip():
                         return False, ("Ce message ne contient qu'une signature "
@@ -800,6 +821,7 @@ class App(object):
         self.bridge.copy()
         self._absorb(clipboard_get(self.root))
         self.source = "presse-papiers"
+        self.manuel = False
         self._stay_on_top()
 
         if not self.draft.strip():
@@ -809,7 +831,8 @@ class App(object):
 
     def _absorb(self, text):
         self.captured = text or ""
-        self.draft, self.signature, self.context = core.split_message(self.captured)
+        self.draft, self.signature, self.context = core.split_message(
+            self.captured, self.signatures)
         self.result = ""
         # Remise a zero systematique : une capture au presse-papiers qui
         # heriterait de "outlook" ferait remplacer a des positions fausses.
@@ -887,6 +910,18 @@ class App(object):
             return
 
         self.result = text                       # le brouillon reecrit, seul
+
+        if self.manuel:
+            # Rien n'est colle : la fenetre refuse les frappes synthetiques.
+            # L'utilisateur colle lui-meme, ses vraies frappes passent.
+            clipboard_set(self.root, core.join_message(
+                text, self.signature, self.context))
+            self.undo_btn.state(["disabled"])
+            self.set_message("Réécrit en %.1f s et copié. Collez avec %s dans "
+                             "votre message — le nouvel Outlook n'autorise pas "
+                             "le remplacement automatique."
+                             % (seconds, "Cmd+V" if MACOS else "Ctrl+V"))
+            return
 
         if self._remplacer_brouillon(self.result):
             # « Restaurer » n'a de sens que si quelque chose a ete ecrit.
