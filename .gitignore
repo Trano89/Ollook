@@ -1,0 +1,20 @@
+# Sortie de compilation : l'executable est publie via les releases GitHub,
+# pas versionne dans l'arbre.
+dist/
+build/
+
+# Preferences locales de l'utilisateur.
+ollook.conf
+
+# Complement COM compile : reconstruit par install-outlook-addin.ps1.
+outlook-addin/*.dll
+
+# ATTENTION : cette archive contient des CLES PRIVEES (certs/ca-key.pem,
+# certs/server-key.pem) du complement web abandonne. Elle ne doit jamais
+# etre publiee.
+archive-complement-web-outlook.zip
+
+# Divers
+__pycache__/
+*.pyc
+*.spec
