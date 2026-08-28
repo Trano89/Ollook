@@ -11,7 +11,7 @@ incremente le dernier chiffre (0.2 -> 0.2.1 -> 0.2.2). Les changements de
 comportement notables passent au chiffre du milieu.
 """
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 DEPOT = "Trano89/Ollook"
 import os as _os

@@ -184,13 +184,20 @@ ollama pull qwen3.5:9b
 
 ## Mises à jour
 
-Ollook interroge GitHub au démarrage. Quand une version plus récente existe, une fenêtre
-l'annonce ; un clic télécharge le nouvel exécutable et **le remplace là où il se trouve**,
-puis relance l'application. Un exécutable en cours ne pouvant s'écraser lui-même, un court
-script prend le relais le temps de l'échange.
+Ollook **se met à jour tout seul**. Il interroge GitHub au démarrage, télécharge la
+nouvelle version en arrière-plan sans rien demander, et **remplace l'exécutable là où il
+se trouve** avant de redémarrer. Un exécutable en cours ne pouvant s'écraser lui-même, un
+court script prend le relais le temps de l'échange.
 
-L'échec de la vérification — hors ligne, quota d'API — est silencieux : une mise à jour ne
-doit jamais empêcher d'écrire un courriel.
+Ce qui n'est jamais automatique, c'est le **moment** :
+
+- jamais pendant une relecture — l'installation attend la fin ;
+- jamais sans un avis de dix secondes, avec un bouton *Plus tard* qui reporte au prochain
+  démarrage.
+
+L'avis propose de décocher l'automatisme si vous préférez décider vous-même. L'échec de la
+vérification — hors ligne, quota d'API — est silencieux : une mise à jour ne doit jamais
+empêcher d'écrire un courriel.
 
 ### Numérotation
 

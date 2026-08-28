@@ -122,7 +122,7 @@ OUTLOOK_PROCESSES = frozenset(("outlook.exe", "olk.exe"))
 
 def load_prefs():
     prefs = {"register": "pro_externe", "model": "", "translate": "0", "scope": "all",
-             "develop": core.DEFAULT_DEVELOPMENT}
+             "develop": core.DEFAULT_DEVELOPMENT, "maj_auto": "1"}
     try:
         with open(PREFS_PATH, encoding="utf-8") as f:
             for line in f:
@@ -492,6 +492,9 @@ class App(object):
         # Vrai quand le dernier remplacement a pu cibler les seuls paragraphes
         # du brouillon, faux quand il a fallu se rabattre sur le message entier.
         self.derniere_precision = False
+        self.maj_info = None       # publication detectee
+        self.maj_chemin = None     # executable telecharge, pret a remplacer
+        self.maj_avis = None       # fenetre d'avis, si affichee
 
         self.root = tk.Tk()
         self.root.title(APP_NAME)
@@ -1119,6 +1122,14 @@ class App(object):
 
 
     # ---- mise a jour ---------------------------------------------------
+    #
+    # Deroulement automatique : on interroge GitHub au demarrage, on telecharge
+    # en arriere-plan sans rien demander, puis on installe des que l'instant
+    # s'y prete. Ce qui n'est jamais automatique, c'est le MOMENT : jamais
+    # pendant une relecture, et jamais sans un court avis a l'ecran, sous peine
+    # de faire disparaitre l'application sous les doigts de l'utilisateur.
+
+    DELAI_AVIS = 10          # secondes d'avis avant redemarrage
 
     def _chercher_maj_async(self):
         """Interroge GitHub en arriere-plan. Silencieux en cas d'echec :
@@ -1133,98 +1144,128 @@ class App(object):
 
         threading.Thread(target=travail, daemon=True).start()
 
-    def _proposer_maj(self, info):
-        """Fenetre annoncant une nouvelle version."""
-        fenetre = tk.Toplevel(self.root)
-        fenetre.title("Mise à jour d'Ollook")
-        fenetre.resizable(False, False)
-        fenetre.transient(self.root)
-        appliquer_icone(fenetre)
+    def _maj_trouvee(self, info):
+        """Une version plus recente existe : on la telecharge sans rien demander."""
+        self.maj_info = info
 
-        cadre = ttk.Frame(fenetre, padding=16)
-        cadre.pack(fill="both", expand=True)
-
-        ttk.Label(cadre, text="Ollook %s est disponible" % info["version"],
-                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(cadre, text="Vous utilisez la version %s." % version.VERSION,
-                  foreground="#555").pack(anchor="w", pady=(2, 0))
-
-        notes = (info.get("notes") or "").strip()
-        if notes:
-            zone = tk.Text(cadre, height=6, width=52, relief="flat", wrap="word",
-                           background="#f4f5f7", font=("Segoe UI", 9))
-            zone.insert("1.0", notes[:1200])
-            zone.configure(state="disabled")
-            zone.pack(fill="x", pady=(10, 0))
-
-        etat = ttk.Label(cadre, text="", foreground="#555", wraplength=380,
-                         justify="left")
-        etat.pack(anchor="w", pady=(10, 0))
-        barre = ttk.Progressbar(cadre, length=380, mode="determinate")
-
-        boutons = ttk.Frame(cadre)
-        boutons.pack(fill="x", pady=(14, 0))
-        plus_tard = ttk.Button(boutons, text="Plus tard", command=fenetre.destroy)
-        plus_tard.pack(side="left")
-        installer = ttk.Button(boutons, text="Mettre à jour")
-        installer.pack(side="right")
-
-        # Depuis les sources il n'y a pas d'executable a echanger.
-        if not (maj.telechargeable() and info.get("lien")):
-            etat.configure(
-                text="Mise à jour automatique indisponible ici. "
-                     "La page des publications s'ouvrira dans votre navigateur.")
-            installer.configure(
-                text="Ouvrir la page",
-                command=lambda: (maj.ouvrir_page(info.get("page")), fenetre.destroy()))
-        else:
-            installer.configure(
-                command=lambda: self._lancer_maj(info, fenetre, installer,
-                                                 plus_tard, etat, barre))
-
-        fenetre.update_idletasks()
-        x = self.root.winfo_x() + 40
-        y = self.root.winfo_y() + 60
-        fenetre.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        fenetre.attributes("-topmost", True)
-        fenetre.focus_force()
-
-    def _lancer_maj(self, info, fenetre, installer, plus_tard, etat, barre):
-        installer.state(["disabled"])
-        plus_tard.state(["disabled"])
-        barre.pack(fill="x", pady=(6, 0))
-        etat.configure(text="Téléchargement…")
-
-        def progres(recu, total):
-            self.events.put(("maj_progres", (recu, total)))
+        # Sans executable a echanger -- lance depuis les sources -- ou si
+        # l'utilisateur a coupe l'automatisme, on se contente de le signaler.
+        if not (maj.telechargeable() and info.get("lien")
+                and self.prefs.get("maj_auto", "1") == "1"):
+            self.set_message("Ollook %s est disponible sur la page des publications."
+                             % info["version"])
+            return
 
         def travail():
             try:
-                chemin = maj.telecharger(info["lien"], progres)
+                chemin = maj.telecharger(info["lien"])
             except Exception as e:                       # noqa: BLE001
                 self.events.put(("maj_echec", str(e)))
                 return
             self.events.put(("maj_prete", chemin))
 
-        self._maj_widgets = (fenetre, installer, plus_tard, etat, barre)
         threading.Thread(target=travail, daemon=True).start()
 
-    def _maj_terminee(self, chemin):
+    def _maj_prete(self, chemin):
+        """Le nouvel executable est en place a cote de l'ancien."""
+        self.maj_chemin = chemin
+        self._tenter_installation()
+
+    def _tenter_installation(self):
+        """Installe des que l'application est disponible.
+
+        Une relecture en cours n'est jamais interrompue : on repasse plus tard."""
+        if not self.maj_chemin or self.maj_avis is not None:
+            return
+        if self.busy:
+            self.root.after(4000, self._tenter_installation)
+            return
+        self._afficher_avis_maj()
+
+    def _afficher_avis_maj(self):
+        """Court avis, puis redemarrage. L'utilisateur peut differer."""
+        info = self.maj_info or {}
+        fenetre = tk.Toplevel(self.root)
+        self.maj_avis = fenetre
+        fenetre.title("Mise a jour d'Ollook")
+        fenetre.resizable(False, False)
+        appliquer_icone(fenetre)
+        fenetre.protocol("WM_DELETE_WINDOW", self._differer_maj)
+
+        cadre = ttk.Frame(fenetre, padding=16)
+        cadre.pack(fill="both", expand=True)
+        ttk.Label(cadre, text="Ollook %s est prete" % info.get("version", ""),
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+
+        compte = ttk.Label(cadre, foreground="#555", wraplength=340, justify="left")
+        compte.pack(anchor="w", pady=(6, 0))
+
+        auto = tk.BooleanVar(value=self.prefs.get("maj_auto", "1") == "1")
+
+        def basculer():
+            self.prefs["maj_auto"] = "1" if auto.get() else "0"
+            save_prefs(self.prefs)
+
+        ttk.Checkbutton(cadre, text="Installer les mises a jour automatiquement",
+                        variable=auto, command=basculer).pack(anchor="w", pady=(10, 0))
+
+        boutons = ttk.Frame(cadre)
+        boutons.pack(fill="x", pady=(14, 0))
+        ttk.Button(boutons, text="Plus tard",
+                   command=self._differer_maj).pack(side="left")
+        ttk.Button(boutons, text="Redemarrer maintenant",
+                   command=self._installer_maj).pack(side="right")
+
+        fenetre.update_idletasks()
+        fenetre.geometry("+%d+%d" % (max(0, self.root.winfo_x() + 40),
+                                     max(0, self.root.winfo_y() + 60)))
+        fenetre.attributes("-topmost", True)
+
+        restant = [self.DELAI_AVIS]
+
+        def tictac():
+            if self.maj_avis is not fenetre:
+                return
+            if self.busy:                      # relecture en cours : on patiente
+                compte.configure(text="Installation des la fin de la relecture.")
+                fenetre.after(1000, tictac)
+                return
+            if restant[0] <= 0:
+                self._installer_maj()
+                return
+            compte.configure(
+                text="Ollook redemarre dans %d seconde%s pour terminer "
+                     "l'installation." % (restant[0], "s" if restant[0] > 1 else ""))
+            restant[0] -= 1
+            fenetre.after(1000, tictac)
+
+        tictac()
+
+    def _differer_maj(self):
+        """Reporte l'installation a la prochaine ouverture."""
+        if self.maj_avis is not None:
+            try:
+                self.maj_avis.destroy()
+            except tk.TclError:
+                pass
+            self.maj_avis = None
+        self.set_message("Mise a jour reportee : elle s'installera au prochain "
+                         "demarrage d'Ollook.")
+
+    def _installer_maj(self):
         """Confie l'echange au script de relais, puis ferme Ollook.
 
-        Le script attend justement la disparition du processus pour pouvoir
+        Le relais attend justement la disparition du processus pour pouvoir
         remplacer le fichier, puis relance l'application."""
-        fenetre, installer, plus_tard, etat, barre = self._maj_widgets
-        etat.configure(text="Installation puis redémarrage…")
-        self.root.update()
-        try:
-            maj.installer(chemin)
-        except Exception as e:                           # noqa: BLE001
-            etat.configure(text="Installation impossible : %s" % e, foreground="#b4232b")
-            installer.state(["!disabled"])
-            plus_tard.state(["!disabled"])
+        if not self.maj_chemin:
             return
-        self.root.after(400, self.root.destroy)
+        try:
+            maj.installer(self.maj_chemin)
+        except Exception as e:                       # noqa: BLE001
+            self.set_message("Installation impossible : %s" % e, error=True)
+            self._differer_maj()
+            return
+        self.root.after(300, self.root.destroy)
 
     # ---- boucle d'evenements ---------------------------------------------
 
@@ -1255,20 +1296,11 @@ class App(object):
                     self.go_btn.configure(text="Réécrire")
                     self.set_message(value, error=True)
                 elif kind == "maj":
-                    self._proposer_maj(value)
-                elif kind == "maj_progres":
-                    recu, total = value
-                    if total and getattr(self, "_maj_widgets", None):
-                        barre = self._maj_widgets[4]
-                        barre.configure(maximum=total, value=recu)
+                    self._maj_trouvee(value)
                 elif kind == "maj_prete":
-                    self._maj_terminee(value)
+                    self._maj_prete(value)
                 elif kind == "maj_echec":
-                    if getattr(self, "_maj_widgets", None):
-                        f, i, pt, e, b = self._maj_widgets
-                        e.configure(text="Téléchargement impossible : %s" % value,
-                                    foreground="#b4232b")
-                        i.state(["!disabled"]); pt.state(["!disabled"])
+                    pass       # un telechargement rate ne gene pas l usage
                 elif kind == "hotkey":
                     self._on_hotkey()
         except queue.Empty:

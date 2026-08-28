@@ -54,11 +54,21 @@ def verifier():
     if not version.plus_recente(etiquette):
         return None
 
+    # Nom exact d'abord, puis n'importe quel executable joint. Sans ce
+    # second choix, une publication nommant son fichier "Ollook-0.2.1.exe"
+    # priverait silencieusement la mise a jour de son lien : la fenetre
+    # s'afficherait, mais sans pouvoir rien telecharger.
     lien = None
+    secours = None
     for piece in publication.get("assets") or []:
-        if (piece.get("name") or "").lower() == version.NOM_EXECUTABLE.lower():
-            lien = piece.get("browser_download_url")
+        nom = (piece.get("name") or "").lower()
+        url = piece.get("browser_download_url")
+        if nom == version.NOM_EXECUTABLE.lower():
+            lien = url
             break
+        if nom.endswith(".exe") and secours is None:
+            secours = url
+    lien = lien or secours
 
     return {
         "version": etiquette.lstrip("vV"),
