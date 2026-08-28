@@ -771,8 +771,11 @@ class App(object):
                 corps = outlook.lire_corps()
                 if corps and corps.strip():
                     self._absorb(corps)
-                    self.source = "outlook"
                     self._stay_on_top()
+                    if not self.draft.strip():
+                        return False, ("Ce message ne contient qu'une signature "
+                                       "ou du texte cité : rien à relire.")
+                    self.source = "outlook"
                     return True, ""
             self._stay_on_top()
 
@@ -800,6 +803,10 @@ class App(object):
         self.captured = text or ""
         self.draft, self.signature, self.context = core.split_message(self.captured)
         self.result = ""
+        # Remise a zero systematique : une capture au presse-papiers qui
+        # heriterait de "outlook" ferait remplacer a des positions fausses.
+        self.source = "presse-papiers"
+        self.zone_ecrite = ""
 
     def _show_capture(self):
         words = len(self.draft.split())
@@ -828,13 +835,13 @@ class App(object):
             self.set_message("Aucun modèle sélectionné.", error=True)
             return
 
-        # Capture a la demande si l'utilisateur n'a pas clique sur « Capturer ».
-        if not self.draft.strip():
-            ok, why = self._grab()
-            self._show_capture()
-            if not ok:
-                self.set_message(why, error=True)
-                return
+        # Capture systematique juste avant la reecriture : le message a pu
+        # changer depuis l'ouverture de la fenetre ou depuis « Capturer ».
+        ok, why = self._grab()
+        self._show_capture()
+        if not ok:
+            self.set_message(why, error=True)
+            return
 
         self.busy = True
         self._save()
@@ -872,11 +879,10 @@ class App(object):
             return
 
         self.result = text                       # le brouillon reecrit, seul
-        self.undo_btn.state(["!disabled"])
 
-        # Le brouillon d'origine est le temoin : c'est lui qui occupe
-        # actuellement la zone a remplacer.
-        if self._replace_in_target(self.result, self.draft):
+        if self._remplacer_brouillon(self.result):
+            # « Restaurer » n'a de sens que si quelque chose a ete ecrit.
+            self.undo_btn.state(["!disabled"])
             garde = []
             if self.signature:
                 garde.append("signature")
@@ -903,37 +909,76 @@ class App(object):
                              "Windows a refusé de rendre le focus."
                              % (seconds, "Cmd+V" if MACOS else "Ctrl+V"))
 
-    def _replace_in_target(self, texte, zone_actuelle):
-        """Remplace le brouillon dans la fenetre cible, et rien d'autre.
+    # ---- ecriture dans la fenetre cible ----------------------------------
+    #
+    # Trois mecanismes, du plus sur au plus grossier. Chacun note dans
+    # `self.zone_ecrite` ce qu'il a reellement inscrit : c'est ce temoin, et
+    # non une reconstruction, qui permet a « Restaurer » de viser juste.
 
-        `zone_actuelle` est le texte qui occupe aujourd'hui la zone a remplacer.
-        Il sert de temoin : apres avoir selectionne, Ollook RELIT la selection
-        et la compare. Tant que la comparaison n'est pas concluante, rien n'est
-        colle -- c'est ce qui evite d'ajouter le texte a la suite au lieu de le
-        remplacer.
+    def _ecrire_par_outlook(self, texte, temoin):
+        """Remplace une plage de caracteres via le modele objet d'Outlook.
 
-        Si la selection par paragraphes echoue, on se rabat sur une selection
-        totale et on recolle l'ensemble recompose : moins elegant, la mise en
-        forme du fil cite est aplatie, mais le resultat reste juste.
-
-        Renvoie False si Windows a refuse de rendre le focus."""
-        if not self.bridge or not self.target_hwnd:
+        Voie exacte : rien d'autre que la plage n'est touche, donc la mise en
+        forme de la signature et du fil cite est integralement preservee."""
+        if outlook is None or self.source != "outlook":
             return False
-        if not self.bridge.is_window(self.target_hwnd):
+        if not outlook.remplacer_debut(len(temoin), texte, temoin):
+            return False
+        self.zone_ecrite = texte
+        self.derniere_precision = True
+        return True
+
+    def _ecrire_par_paragraphes(self, texte, temoin):
+        """Selectionne les paragraphes du temoin au clavier, puis colle.
+
+        La selection est RELUE et comparee avant tout collage : sans cette
+        verification, une selection ratee ferait ajouter le texte a la suite
+        au lieu de le remplacer."""
+        if not self.bridge:
+            return False
+        self.bridge.select_top_paragraphs(paragraphes(temoin))
+        self.bridge.copy()
+        if not memes_mots(clipboard_get(self.root), temoin):
+            return False
+        clipboard_set(self.root, texte)
+        self.bridge.paste()
+        self.zone_ecrite = texte
+        self.derniere_precision = True
+        return True
+
+    def _ecrire_tout(self, texte):
+        """Dernier recours : tout selectionner et tout remplacer.
+
+        La mise en forme du fil cite est aplatie ; on ne l'emploie que faute
+        de mieux, et l'utilisateur en est averti."""
+        if not self.bridge:
+            return False
+        self.bridge.select_all()
+        clipboard_set(self.root, texte)
+        self.bridge.paste()
+        self.zone_ecrite = texte
+        self.derniere_precision = False
+        return True
+
+    def _cible_utilisable(self):
+        return bool(self.bridge and self.target_hwnd
+                    and self.bridge.is_window(self.target_hwnd))
+
+    def _remplacer_brouillon(self, texte):
+        """Ecrit le brouillon reecrit dans la fenetre cible.
+
+        Renvoie False si rien n'a pu etre ecrit ; le texte est alors laisse
+        dans le presse-papiers pour que l'utilisateur colle lui-meme."""
+        if not self._cible_utilisable():
+            clipboard_set(self.root, texte)
             return False
 
-        # Voie exacte : Outlook remplace lui-meme la plage de caracteres du
-        # brouillon. Ni selection, ni presse-papiers, ni frappe clavier -- donc
-        # aucun risque pour la mise en forme de ce qui suit.
-        if self.source == "outlook" and outlook is not None:
-            if outlook.remplacer_debut(len(zone_actuelle), texte, zone_actuelle):
-                self.derniere_precision = True
+        if self.source == "outlook":
+            if self._ecrire_par_outlook(texte, self.draft):
                 self._stay_on_top()
                 return True
-            # Echec : le message a change, ou l'editeur n'est plus joignable.
-            # On ne se rabat surtout PAS sur un collage integral, qui abimerait
-            # la mise en forme de la signature. Le texte reste disponible dans
-            # le presse-papiers, l'utilisateur decide.
+            # On ne se rabat PAS sur un collage integral : cela abimerait la
+            # mise en forme de la signature, ce que l'utilisateur refuse.
             self.derniere_precision = False
             clipboard_set(self.root, texte)
             self._stay_on_top()
@@ -941,31 +986,25 @@ class App(object):
 
         self.root.update()
         if not self.bridge.focus(self.target_hwnd):
+            clipboard_set(self.root, texte)
             self._stay_on_top()
             return False
 
-        tout = self.scope.get() == "all"
-        precis = False
-
-        if tout:
-            # Selectionner, puis verifier ce qui l'a ete.
-            self.bridge.select_top_paragraphs(paragraphes(zone_actuelle))
-            self.bridge.copy()
-            precis = memes_mots(clipboard_get(self.root), zone_actuelle)
-            if not precis:
-                # La selection n'a pas pris : on repart d'une selection totale,
-                # sur laquelle on peut compter.
-                self.bridge.select_all()
-
-        if precis:
-            charge = texte + self._separateur_signature()
+        if self.scope.get() == "all":
+            if not self._ecrire_par_paragraphes(texte + self._separateur_signature(),
+                                                self.draft):
+                self._ecrire_tout(core.join_message(texte, self.signature,
+                                                    self.context))
         else:
-            charge = core.join_message(texte, self.signature, self.context)
+            # La selection de l'utilisateur delimite la zone : on lui restitue
+            # tout ce qu'elle contenait, sans quoi le reste serait perdu.
+            clipboard_set(self.root,
+                          core.join_message(texte, self.signature, self.context))
+            self.bridge.paste()
+            self.zone_ecrite = core.join_message(texte, self.signature, self.context)
+            self.derniere_precision = True
 
-        clipboard_set(self.root, charge)
-        self.bridge.paste()
         self._stay_on_top()
-        self.derniere_precision = precis
         return True
 
     def _separateur_signature(self):
@@ -983,16 +1022,38 @@ class App(object):
         return "" if self.captured[:debut].endswith("\n\n") else "\n"
 
     def undo(self):
-        """Remet le brouillon d'origine, en ne touchant que sa zone."""
-        if not self.captured:
+        """Remet le texte d'origine exactement la ou la reecriture a ecrit."""
+        if not self.captured or not self.zone_ecrite:
             return
-        # Ce qui occupe la zone maintenant, c'est le texte reecrit.
-        if self._replace_in_target(self.draft, self.result or self.draft):
-            self.set_message("Texte d'origine restauré.")
+        if not self._cible_utilisable():
+            clipboard_set(self.root, self.draft)
+            self.set_message("Fenêtre cible introuvable. Texte d'origine copié.",
+                             error=True)
+            return
+
+        if self.derniere_precision:
+            # Seule la zone du brouillon avait ete touchee.
+            if self.source == "outlook":
+                ok = self._ecrire_par_outlook(self.draft, self.zone_ecrite)
+            else:
+                self.root.update()
+                ok = (self.bridge.focus(self.target_hwnd)
+                      and self._ecrire_par_paragraphes(self.draft, self.zone_ecrite))
         else:
-            self.set_message("Texte d'origine copié. Collez avec %s."
-                             % ("Cmd+V" if MACOS else "Ctrl+V"))
-        self.undo_btn.state(["disabled"])
+            # Le message entier avait ete remplace : on le remet entier.
+            self.root.update()
+            ok = (self.bridge.focus(self.target_hwnd)
+                  and self._ecrire_tout(self.captured))
+
+        self._stay_on_top()
+        if ok:
+            self.set_message("Texte d'origine restauré.")
+            self.undo_btn.state(["disabled"])
+        else:
+            clipboard_set(self.root, self.draft)
+            self.set_message("Restauration impossible — le message a changé. "
+                             "Texte d'origine copié, collez avec %s."
+                             % ("Cmd+V" if MACOS else "Ctrl+V"), error=True)
 
     # ---- fenetre ---------------------------------------------------------
 
@@ -1168,6 +1229,12 @@ class App(object):
     # ---- boucle d'evenements ---------------------------------------------
 
     def _poll_events(self):
+        # La fenetre peut disparaitre pendant qu'un rappel est en attente.
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
         try:
             while True:
                 kind, value = self.events.get_nowait()

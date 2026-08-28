@@ -7,7 +7,7 @@ Verifie, et installe au besoin, ce dont Ollook a besoin pour fonctionner :
 
   1. Ollama present sur la machine ;
   2. Ollama demarre ;
-  3. au moins un modele installe -- a defaut, gemma4:12b.
+  3. au moins un modele installe, choisi selon la carte graphique.
 
 Rien n'est telecharge sans accord explicite : l'interface demande confirmation
 avant d'installer Ollama comme avant de tirer un modele, en annoncant la taille.
@@ -31,12 +31,141 @@ import ollook_core as core  # noqa: E402
 WINDOWS = sys.platform.startswith("win")
 MACOS = sys.platform == "darwin"
 
-# Modele par defaut. Le 12b plutot qu'un e2b/e4b : en dessous d'environ quatre
-# milliards de parametres, les modeles corrigent l'orthographe mais ignorent la
-# consigne de registre -- le tutoiement en pro interne ne passe pas -- ce qui
-# vide l'outil de son interet.
-DEFAULT_MODEL = "gemma4:12b"
-DEFAULT_MODEL_SIZE = "7,6 Go"
+# --------------------------------------------------------------------------
+# Catalogue Qwen 3.5
+#
+# `besoin` est la memoire graphique a avoir pour faire tourner le modele :
+# la taille du fichier majoree d'environ 15 % pour le cache d'attention.
+# La liste est classee par QUALITE decroissante : le premier modele qui tient
+# dans la carte est le bon.
+#
+# Sous environ quatre milliards de parametres, les modeles corrigent
+# l'orthographe mais ignorent la consigne de registre -- le tutoiement en pro
+# interne ne passe pas. Les petites variantes portent donc un avertissement.
+# --------------------------------------------------------------------------
+
+MODELES = [
+    {"tag": "qwen3.5:35b", "taille": 24.0, "besoin": 27.6, "titre": "35 milliards",
+     "note": "le plus capable ; carte de 28 Go ou plus"},
+    {"tag": "qwen3.5:27b", "taille": 17.0, "besoin": 19.6, "titre": "27 milliards",
+     "note": "excellent respect du registre et de la traduction"},
+    {"tag": "qwen3.5:9b", "taille": 6.6, "besoin": 7.6, "titre": "9 milliards",
+     "note": "bon compromis, convient a la plupart des cartes"},
+    {"tag": "qwen3.5:4b", "taille": 3.4, "besoin": 3.9, "titre": "4 milliards",
+     "note": "leger ; le registre passe mal"},
+    {"tag": "qwen3.5:2b", "taille": 2.7, "besoin": 3.1, "titre": "2 milliards",
+     "note": "dernier recours ; corrige l'orthographe, ignore le registre"},
+]
+
+# Repli quand la memoire graphique ne peut pas etre mesuree.
+DEFAULT_MODEL = "qwen3.5:9b"
+DEFAULT_MODEL_SIZE = "6,6 Go"
+
+
+_PS_CARTES = r"""
+$presentes = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.Name })
+Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    $octets = $p.'HardwareInformation.qwMemorySize'
+    if ($octets -and ($presentes -contains $p.DriverDesc)) {
+      '{0}|{1}' -f $p.DriverDesc, $octets
+    }
+  }
+"""
+
+
+def _sortie_commande(commande, entree=None):
+    try:
+        return subprocess.check_output(
+            commande, stderr=subprocess.DEVNULL, input=entree,
+            creationflags=0x08000000 if WINDOWS else 0,
+            timeout=20).decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def detecter_carte():
+    """Renvoie (nom, memoire_en_Go) de la carte graphique la plus capable.
+
+    Deux methodes, dans cet ordre :
+      1. nvidia-smi, exact pour toute carte NVIDIA ;
+      2. le registre Windows, qui expose la vraie taille sur 64 bits pour
+         n'importe quel fabricant -- AMD et Intel compris.
+
+    On ne se sert pas du champ AdapterRAM de WMI : c'est un entier 32 bits qui
+    plafonne a 4 Go et annoncerait 4 Go pour une carte de 20. Les entrees de
+    registre sont recoupees avec les cartes reellement presentes, sinon un
+    pilote desinstalle fausserait la mesure."""
+    chemins = ["nvidia-smi"]
+    for base in (os.environ.get("PROGRAMFILES", ""), os.environ.get("SYSTEMROOT", "")):
+        if base:
+            chemins.append(os.path.join(base, "NVIDIA Corporation", "NVSMI",
+                                        "nvidia-smi.exe"))
+            chemins.append(os.path.join(base, "System32", "nvidia-smi.exe"))
+
+    for chemin in chemins:
+        sortie = _sortie_commande(
+            [chemin, "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"])
+        cartes = []
+        for ligne in sortie.splitlines():
+            if "," not in ligne:
+                continue
+            nom, _, memoire = ligne.rpartition(",")
+            memoire = memoire.strip()
+            if memoire.isdigit():
+                cartes.append((nom.strip(), int(memoire) / 1024.0))
+        if cartes:
+            return max(cartes, key=lambda c: c[1])
+
+    if not WINDOWS:
+        return None, None
+
+    sortie = _sortie_commande(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_CARTES])
+    cartes = []
+    for ligne in sortie.splitlines():
+        if "|" not in ligne:
+            continue
+        nom, _, octets = ligne.rpartition("|")
+        octets = octets.strip()
+        if octets.isdigit():
+            cartes.append((nom.strip(), int(octets) / (1024.0 ** 3)))
+    if cartes:
+        return max(cartes, key=lambda c: c[1])
+
+    return None, None
+
+
+def detecter_vram():
+    """Memoire graphique en gigaoctets, ou None."""
+    return detecter_carte()[1]
+
+
+def modele_recommande(vram=None):
+    """Meilleur modele tenant dans la memoire graphique.
+
+    Le catalogue etant classe par qualite, le premier qui tient est le bon."""
+    if vram is None:
+        vram = detecter_vram()
+    if vram is None:
+        return DEFAULT_MODEL
+    for modele in MODELES:
+        if modele["besoin"] <= vram:
+            return modele["tag"]
+    # Aucune carte assez grande : le plus leger, quitte a tourner sur le
+    # processeur -- Ollama bascule tout seul, plus lentement.
+    return MODELES[-1]["tag"]
+
+
+def modele_par_tag(tag):
+    for modele in MODELES:
+        if modele["tag"] == tag:
+            return modele
+    return None
+
 
 OLLAMA_WINDOWS_URL = "https://ollama.com/download/OllamaSetup.exe"
 OLLAMA_MACOS_URL = "https://ollama.com/download/Ollama.dmg"
@@ -279,6 +408,7 @@ def run_setup_ui():
 
     evenements = queue.Queue()
     resultat = {"pret": False, "en_cours": False}
+    choisi = [DEFAULT_MODEL]        # fige au moment du clic
 
     racine = tk.Tk()
     racine.title("Ollook — mise en route")
@@ -301,6 +431,43 @@ def run_setup_ui():
 
     resume = ttk.Label(cadre, text="", wraplength=430, justify="left")
     resume.pack(anchor="w", pady=(8, 0))
+
+    # ---- choix du modele ------------------------------------------------
+    choix = ttk.Frame(cadre)
+    choix.pack(fill="x", pady=(12, 0))
+    ttk.Label(choix, text="MODÈLE À INSTALLER", font=("Segoe UI", 8),
+              foreground="#777").pack(anchor="w")
+
+    vram = detecter_vram()
+    conseille = modele_recommande(vram)
+    libelles = ["%s — %s, %.1f Go%s"
+                % (m["tag"], m["titre"], m["taille"],
+                   "   ← conseillé" if m["tag"] == conseille else "")
+                for m in MODELES]
+    liste = ttk.Combobox(choix, state="readonly", width=52, values=libelles)
+    liste.current([m["tag"] for m in MODELES].index(conseille))
+    liste.pack(fill="x", pady=(2, 0))
+
+    detail = ttk.Label(choix, text="", foreground="#777", font=("Segoe UI", 8),
+                       wraplength=430, justify="left")
+    detail.pack(anchor="w", pady=(3, 0))
+
+    def decrire(_e=None):
+        modele = MODELES[liste.current()]
+        tient = vram is None or modele["besoin"] <= vram
+        detail.configure(
+            text="%s. Il faut environ %.1f Go de mémoire graphique%s."
+                 % (modele["note"], modele["besoin"],
+                    "" if tient else " — au-delà de votre carte, il tournera lentement"),
+            foreground="#777" if tient else "#a86a00")
+
+    liste.bind("<<ComboboxSelected>>", decrire)
+    decrire()
+
+    ttk.Label(choix, foreground="#777", font=("Segoe UI", 8),
+              text=("Carte graphique : %.1f Go de mémoire" % vram) if vram
+                   else "Mémoire graphique non détectée — choix par défaut."
+              ).pack(anchor="w", pady=(2, 0))
 
     etat = ttk.Label(cadre, text="", foreground="#555", wraplength=430, justify="left")
     etat.pack(anchor="w", pady=(12, 4))
@@ -351,9 +518,10 @@ def run_setup_ui():
         a_faire = []
         if besoins["ollama"]:
             a_faire.append("télécharger et installer Ollama depuis ollama.com")
-        if besoins["modele"] or (besoins["ollama"] and True):
-            a_faire.append("télécharger le modèle %s (%s)"
-                           % (DEFAULT_MODEL, DEFAULT_MODEL_SIZE))
+        if besoins["modele"] or besoins["ollama"]:
+            modele = MODELES[liste.current()]
+            a_faire.append("télécharger le modèle %s (%.1f Go)"
+                           % (modele["tag"], modele["taille"]))
         if besoins["demarrage"]:
             a_faire.insert(0, "démarrer Ollama")
 
@@ -384,7 +552,7 @@ def run_setup_ui():
                     evenements.put(("fini", False))
                     return
             if not installed_models():
-                if not pull_model(DEFAULT_MODEL, progres, log):
+                if not pull_model(choisi[0], progres, log):
                     evenements.put(("fini", False))
                     return
             evenements.put(("fini", True))
@@ -400,8 +568,11 @@ def run_setup_ui():
             racine.destroy()
             return
         resultat["en_cours"] = True
+        # Fige le choix : le fil d'execution ne doit pas lire un widget.
+        choisi[0] = MODELES[liste.current()]["tag"]
         lancer.state(["disabled"])
         quitter.state(["disabled"])
+        liste.state(["disabled"])
         threading.Thread(target=travail, daemon=True).start()
 
     lancer.configure(command=demarrer)
