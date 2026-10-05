@@ -220,28 +220,41 @@ estimation faite d'avance, et imposer un nombre ferait échouer le chargement d'
 trop gros. Si le modèle choisi dépasse la mémoire de la carte, Ollook vous le dit et
 suggère un modèle plus petit.
 
-### Le NPU : détecté, mais inutilisable par Ollama
+### Le NPU, quand un serveur sait le piloter
 
-**Ollama n'a aucun moteur NPU.** Ses moteurs sont CPU, CUDA, Metal, ROCm et Vulkan. Ollook
-détecte quand même le NPU et vous l'annonce — avec la pile qu'il faudrait pour l'exploiter —
-plutôt que d'offrir un bouton qui ne changerait rien :
+**Ollama n'a aucun moteur NPU** — ses moteurs sont CPU, CUDA, Metal, ROCm et Vulkan. Mais
+d'autres serveurs en ont un *et* parlent son API. [Lemonade](https://github.com/lemonade-sdk/lemonade),
+d'AMD, implémente l'API d'Ollama et répartit le calcul entre NPU et carte graphique sur les
+Ryzen AI. Ollook s'y adresse sans changer une ligne de protocole.
 
-> NPU détecté (Intel(R) AI Boost) mais Ollama ne sait pas s'en servir : il faudrait OpenVINO.
+Au démarrage, **si un NPU est présent**, Ollook sonde `http://localhost:13305`. Si un tel
+serveur répond, le bouton **NPU** s'active, **Auto le préfère**, et la liste des modèles
+provient de ce serveur — pas d'Ollama, qui n'héberge pas les mêmes.
 
-Chaque fabricant impose sa propre pile et des modèles convertis en ONNX, compilés à l'avance :
-**OpenVINO** chez Intel, **QNN/Hexagon** chez Qualcomm, **Ryzen AI** chez AMD.
+> NPU AMD XDNA(TM) Neural Processing Unit piloté par Lemonade (http://localhost:13305).
 
-Si vous voulez vraiment passer par le NPU, la voie est un **serveur tiers compatible avec
-l'API d'Ollama** — par exemple [NoLlama](https://github.com/aweussom/NoLlama), qui s'appuie
-sur OpenVINO pour les NPU Intel. Ollook honore la variable `OLLAMA_HOST` et s'y connectera
-sans modification :
+Sans serveur, le bouton reste grisé et Ollook dit quoi installer plutôt que d'offrir une
+option décorative :
+
+> NPU détecté (AMD XDNA(TM) Neural Processing Unit) mais Ollama ne sait pas s'en servir :
+> installez Lemonade.
+
+| NPU | À installer |
+|---|---|
+| **AMD** XDNA / Ryzen AI | Lemonade |
+| **Qualcomm** Hexagon | Lemonade ou FastFlowLM |
+| **Intel** AI Boost | NoLlama (OpenVINO) |
+
+Attention à la génération : l'exécution hybride NPU+GPU de Lemonade cible **XDNA 2**
+(Ryzen AI 300/400, Strix). Sur un **XDNA 1** (Ryzen 7040/8040, série 200 — un Ryzen 7 250
+par exemple, 16 TOPS), le NPU n'est pas forcément exploitable. Ollook ne le devine pas : il
+sonde, et le bouton ne s'active que si un serveur répond vraiment.
+
+Vous pouvez aussi pointer Ollook ailleurs par `OLLAMA_HOST` :
 
 ```bash
-set OLLAMA_HOST=http://127.0.0.1:11435
+set OLLAMA_HOST=http://127.0.0.1:13305
 ```
-
-Le jour où Ollama gagnera un moteur NPU, **Auto** le préférera : il suffira d'ajouter `npu`
-à l'ensemble `MOTEURS` dans `ollook_core.py`.
 
 ### Petit GPU
 

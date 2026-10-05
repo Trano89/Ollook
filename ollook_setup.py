@@ -646,11 +646,13 @@ _FABRICANTS = (
     ("amd", ("xdna", "ryzen ai")),
 )
 
-# Pile logicielle a employer pour exploiter reellement chaque NPU.
+# Ce qu'il faut INSTALLER pour exploiter reellement chaque NPU : un serveur
+# qui parle l'API d'Ollama, pas le nom de la pile de bas niveau -- l'un est
+# actionnable, l'autre non.
 PILES_NPU = {
-    "intel": "OpenVINO",
-    "qualcomm": "QNN (Hexagon)",
-    "amd": "Ryzen AI",
+    "intel": "NoLlama (OpenVINO)",
+    "qualcomm": "Lemonade ou FastFlowLM",
+    "amd": "Lemonade",
 }
 
 

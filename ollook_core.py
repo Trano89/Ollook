@@ -584,16 +584,17 @@ def join_message(body, signature, context):
 # Appels Ollama
 # --------------------------------------------------------------------------
 
-def ollama_get(path, timeout=5):
-    req = urllib.request.Request(OLLAMA + path, headers={"Accept": "application/json"})
+def ollama_get(path, timeout=5, hote=None):
+    req = urllib.request.Request((hote or OLLAMA) + path,
+                                 headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
-def ollama_post_stream(path, payload, timeout=600):
+def ollama_post_stream(path, payload, timeout=600, hote=None):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        OLLAMA + path,
+        (hote or OLLAMA) + path,
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -601,9 +602,9 @@ def ollama_post_stream(path, payload, timeout=600):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def list_models():
+def list_models(hote=None):
     """Modeles installes localement, tries par nom."""
-    data = ollama_get("/api/tags", timeout=8)
+    data = ollama_get("/api/tags", timeout=8, hote=hote)
     models = []
     for m in data.get("models", []):
         details = m.get("details") or {}
@@ -616,8 +617,36 @@ def list_models():
     return models
 
 
-def ollama_version():
-    return ollama_get("/api/version", timeout=3).get("version", "?")
+def ollama_version(hote=None):
+    return ollama_get("/api/version", timeout=3, hote=hote).get("version", "?")
+
+
+# --------------------------------------------------------------------------
+# Serveurs capables de piloter un NPU
+#
+# Ollama n'a aucun moteur NPU, mais d'autres serveurs en ont un ET parlent son
+# API -- Lemonade, d'AMD, implemente l'API d'Ollama en plus de celle d'OpenAI
+# et repartit le calcul entre NPU et carte graphique sur les Ryzen AI. Ollook
+# peut donc s'y adresser sans changer une ligne de protocole.
+#
+# On ne declare le NPU utilisable que si un tel serveur REPOND : c'est la
+# difference entre une option vraie et un bouton decoratif.
+# --------------------------------------------------------------------------
+
+SERVEURS_NPU = (
+    ("Lemonade", "http://localhost:13305"),
+)
+
+
+def detecter_serveur_npu(timeout=1.5):
+    """(nom, url) du premier serveur a NPU qui repond, ou (None, None)."""
+    for nom, url in SERVEURS_NPU:
+        try:
+            ollama_get("/api/tags", timeout=timeout, hote=url)
+        except Exception:
+            continue
+        return nom, url
+    return None, None
 
 
 # --------------------------------------------------------------------------
@@ -640,6 +669,11 @@ def ollama_version():
 
 MOTEURS = frozenset(("gpu", "cpu"))
 
+# Le NPU rejoint les moteurs des qu'un serveur capable repond : c'est
+# serveur_npu qui le decide, pas une constante.
+def moteurs(serveur_npu=False):
+    return MOTEURS | {"npu"} if serveur_npu else MOTEURS
+
 UNITES = {
     "auto": {"label": "Auto", "hint": "le meilleur materiel disponible"},
     "gpu": {"label": "GPU", "hint": "carte graphique, nettement plus rapide"},
@@ -651,22 +685,23 @@ UNITE_ORDER = ["auto", "gpu", "cpu"]
 DEFAULT_UNITE = "auto"
 
 
-def resoudre_unite(unite, gpu_present=True, npu_present=False):
+def resoudre_unite(unite, gpu_present=True, npu_present=False,
+                   serveur_npu=False):
     """Unite de calcul reellement employee.
 
-    'auto' prefere le NPU des qu'Ollama saura s'en servir, puis la carte
-    graphique, puis le processeur. Un choix explicite est respecte, sauf s'il
-    designe un materiel qu'Ollama ne pilote pas ou qui est absent."""
+    'auto' prefere le NPU quand il existe ET qu'un serveur sait le piloter,
+    puis la carte graphique, puis le processeur. Un choix explicite est
+    respecte, sauf s'il designe un materiel absent ou sans moteur."""
     if unite not in UNITES:
         unite = DEFAULT_UNITE
+    disponibles = moteurs(serveur_npu)
 
     if unite == "auto":
-        if npu_present and "npu" in MOTEURS:
+        if npu_present and "npu" in disponibles:
             return "npu"
         return "gpu" if gpu_present else "cpu"
 
-    if unite not in MOTEURS:
-        # NPU demande, aucun moteur pour le piloter.
+    if unite not in disponibles:
         return "gpu" if gpu_present else "cpu"
     if unite == "gpu" and not gpu_present:
         return "cpu"
@@ -677,6 +712,10 @@ def options_unite(unite):
     """Fragment d'options Ollama pour une unite DEJA resolue."""
     if unite == "cpu":
         return {"num_gpu": 0}
+    if unite == "npu":
+        # Le serveur a NPU decide seul de sa repartition ; num_gpu n'a pas de
+        # sens pour lui et pourrait etre mal interprete.
+        return {}
     # Rien a imposer : Ollama sature la carte puis deborde de lui-meme, et il
     # mesure la memoire libre mieux qu'une estimation faite ici.
     return {}
@@ -698,7 +737,7 @@ def avis_memoire(vram_go, taille_modele_go):
 
 
 def rewrite_stream(model, draft, context, register, translate,
-                   develop=DEFAULT_DEVELOPMENT, unite=None):
+                   develop=DEFAULT_DEVELOPMENT, unite=None, hote=None):
     """Genere des evenements ('thinking', bool), ('delta', str), ('done', str).
 
     Valide strictement ses arguments : c'est le seul point d'entree de la
@@ -711,8 +750,11 @@ def rewrite_stream(model, draft, context, register, translate,
         raise ValueError("niveau de developpement invalide")
     if not isinstance(draft, str) or not draft.strip():
         raise ValueError("message vide")
-    if unite is not None and unite not in MOTEURS:
+    if unite is not None and unite not in moteurs(serveur_npu=True):
         raise ValueError("unite de calcul invalide")
+    if unite == "npu" and not hote:
+        # Sans serveur, "npu" ne designe rien d'executable.
+        raise ValueError("aucun serveur capable de piloter le NPU")
 
     draft = draft[:MAX_DRAFT]
     context = (context or "").strip()
@@ -742,12 +784,12 @@ def rewrite_stream(model, draft, context, register, translate,
     try:
         payload = dict(body)
         payload["think"] = False
-        upstream = ollama_post_stream("/api/chat", payload)
+        upstream = ollama_post_stream("/api/chat", payload, hote=hote)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")
         if "think" not in detail.lower():
             raise RuntimeError("Ollama a refuse la requete : %s" % detail[:300])
-        upstream = ollama_post_stream("/api/chat", body)
+        upstream = ollama_post_stream("/api/chat", body, hote=hote)
 
     raw = ""
     sent = 0

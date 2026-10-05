@@ -503,8 +503,10 @@ class App(object):
         self.manuel = False
         # Materiel de calcul, mesure en arriere-plan : la detection
         # interroge nvidia-smi et PowerShell, trop lent pour l'ouverture.
-        self.materiel = {"gpu": (None, None), "npu": (None, None)}
+        self.materiel = {"gpu": (None, None), "npu": (None, None),
+                         "serveur_npu": (None, None)}
         self.tailles = {}          # nom de modele -> octets
+        self._hote_affiche = None  # serveur dont la liste est affichee
         # Signatures reellement configurees dans Outlook classique. Les
         # connaitre rend la frontiere du brouillon exacte.
         self.signatures = outlook.signatures_connues() if outlook else []
@@ -633,10 +635,15 @@ class App(object):
         calc_row = ttk.Frame(frame)
         calc_row.pack(fill="x", **pad)
         self.unite = tk.StringVar(value=self.prefs["unite"])
-        for key in core.UNITE_ORDER:
-            ttk.Radiobutton(calc_row, text=core.UNITES[key]["label"], value=key,
-                            variable=self.unite,
-                            command=self._on_unite).pack(side="left", padx=(0, 12))
+        self.boutons_unite = {}
+        for key in core.UNITE_ORDER + ["npu"]:
+            bouton = ttk.Radiobutton(calc_row, text=core.UNITES[key]["label"],
+                                     value=key, variable=self.unite,
+                                     command=self._on_unite)
+            bouton.pack(side="left", padx=(0, 12))
+            self.boutons_unite[key] = bouton
+        # Aucun serveur a NPU connu pour l'instant.
+        self.boutons_unite["npu"].state(["disabled"])
         self.calc_hint = ttk.Label(frame, text="détection du matériel…",
                                    foreground="#777", font=("Segoe UI", 8),
                                    wraplength=360, justify="left")
@@ -662,15 +669,26 @@ class App(object):
     # ---- unite de calcul -------------------------------------------------
 
     def _on_unite(self):
+        avant = self._hote_affiche
         self._maj_indication_calcul()
         self._save()
+        if self.hote_actif() != avant:
+            # On passe d'un serveur a l'autre : la liste des modeles change.
+            self._refresh_models_async()
 
     def unite_resolue(self):
-        """Unite reellement transmise a Ollama."""
+        """Unite reellement employee."""
         return core.resoudre_unite(
             self.unite.get(),
             gpu_present=bool(self.materiel["gpu"][0]),
-            npu_present=bool(self.materiel["npu"][0]))
+            npu_present=bool(self.materiel["npu"][0]),
+            serveur_npu=bool(self.materiel["serveur_npu"][0]))
+
+    def hote_actif(self):
+        """Serveur a interroger : celui du NPU, ou None pour Ollama."""
+        if self.unite_resolue() == "npu":
+            return self.materiel["serveur_npu"][1]
+        return None
 
     def _detecter_materiel_async(self):
         threading.Thread(target=self._detecter_materiel, daemon=True).start()
@@ -682,7 +700,9 @@ class App(object):
             npu = setup.detecter_npu()
         except Exception:
             gpu, npu = (None, None), (None, None)
-        self.events.put(("materiel", (gpu, npu)))
+        # On ne sonde un serveur a NPU que s'il y a un NPU a piloter.
+        serveur = core.detecter_serveur_npu() if npu[0] else (None, None)
+        self.events.put(("materiel", (gpu, npu, serveur)))
 
     def _maj_indication_calcul(self):
         """Dit ce qui sera employe, et ce qui ne peut pas l'etre.
@@ -697,7 +717,9 @@ class App(object):
         if self.unite.get() == "auto":
             lignes.append("Auto → %s" % core.UNITES[reelle]["label"])
 
-        if reelle == "gpu" and nom_gpu:
+        if reelle == "npu" and nom_npu:
+            lignes.append(nom_npu)
+        elif reelle == "gpu" and nom_gpu:
             lignes.append("%s%s" % (nom_gpu, ", %.0f Go" % vram if vram else ""))
         elif reelle == "cpu":
             lignes.append("processeur" if nom_gpu else
@@ -705,11 +727,15 @@ class App(object):
 
         texte = " — ".join(lignes) if lignes else core.UNITES[reelle]["hint"]
 
-        if nom_npu:
+        nom_serveur, url_serveur = self.materiel["serveur_npu"]
+        if nom_npu and nom_serveur:
+            texte += ("\nNPU %s piloté par %s (%s)."
+                      % (nom_npu, nom_serveur, url_serveur))
+        elif nom_npu:
             import ollook_setup as setup
             pile = setup.PILES_NPU.get(fabricant)
             texte += ("\nNPU détecté (%s) mais Ollama ne sait pas s'en servir%s."
-                      % (nom_npu, " : il faudrait %s" % pile if pile else ""))
+                      % (nom_npu, " : installez %s" % pile if pile else ""))
 
         if reelle == "gpu" and vram:
             octets = self.tailles.get(self.selected_model())
@@ -791,19 +817,28 @@ class App(object):
     # ---- etat d'Ollama --------------------------------------------------
 
     def _refresh_models_async(self):
-        threading.Thread(target=self._refresh_models, daemon=True).start()
+        # L'hote est resolu ICI, dans le fil principal : il depend de
+        # variables tkinter, qu'un fil secondaire ne peut pas lire.
+        hote = self.hote_actif()
+        self._hote_affiche = hote
+        threading.Thread(target=self._refresh_models, args=(hote,),
+                         daemon=True).start()
 
-    def _refresh_models(self):
+    def _refresh_models(self, hote=None):
         try:
-            version = core.ollama_version()
-            models = core.list_models()
+            version = core.ollama_version(hote)
+            models = core.list_models(hote)
         except Exception as e:
             self.events.put(("ollama_down", str(e)))
             return
-        self.events.put(("ollama_up", (version, models)))
+        self.events.put(("ollama_up", (version, models, hote)))
 
-    def _apply_models(self, version, models):
-        self.status.configure(text="Ollama %s" % version, foreground="#1a7f4b")
+    def _apply_models(self, version, models, hote=None):
+        # Le nom vient de l'hote REELLEMENT interroge, pas du reglage
+        # courant : entre la demande et la reponse, l'un peut avoir change.
+        nom_serveur = self.materiel["serveur_npu"][0] if hote else "Ollama"
+        self.status.configure(text="%s %s" % (nom_serveur or "Serveur", version),
+                              foreground="#1a7f4b")
         if not models:
             self.model["values"] = []
             self.set_message("Aucun modèle installé. Par exemple : ollama pull mistral-small",
@@ -972,14 +1007,15 @@ class App(object):
         threading.Thread(target=self._work, args=(
             model, self.draft, self.context, self.register.get(),
             self.translate.get(), self.develop.get(),
-            self.unite_resolue()), daemon=True).start()
+            self.unite_resolue(), self.hote_actif()), daemon=True).start()
 
     def _work(self, model, draft, context, register, translate, develop,
-              unite=None):
+              unite=None, hote=None):
         started = time.time()
         try:
             for kind, value in core.rewrite_stream(model, draft, context, register,
-                                                   translate, develop, unite):
+                                                   translate, develop, unite,
+                                                   hote):
                 if kind == "thinking":
                     self.events.put(("thinking", value))
                 elif kind == "done":
@@ -1413,8 +1449,14 @@ class App(object):
                 if kind == "ollama_up":
                     self._apply_models(*value)
                 elif kind == "materiel":
-                    self.materiel["gpu"], self.materiel["npu"] = value
+                    (self.materiel["gpu"], self.materiel["npu"],
+                     self.materiel["serveur_npu"]) = value
+                    if self.materiel["serveur_npu"][0]:
+                        self.boutons_unite["npu"].state(["!disabled"])
                     self._maj_indication_calcul()
+                    # Le serveur a NPU n'heberge pas les memes modeles.
+                    if self.unite_resolue() == "npu":
+                        self._refresh_models_async()
                 elif kind == "ollama_down":
                     self.status.configure(text="Ollama arrêté", foreground="#b4232b")
                     self.set_message("Ollama ne répond pas. Lancez-le :  ollama serve",
