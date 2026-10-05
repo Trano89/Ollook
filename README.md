@@ -204,6 +204,53 @@ ollama pull qwen3.5:9b
 
 ---
 
+## CPU, GPU, NPU
+
+Ollook choisit l'unité de calcul, ou vous la lui imposez : **Auto** *(défaut)*, **GPU** ou
+**CPU**. Il affiche la carte détectée et ce qui sera réellement employé.
+
+| Réglage | Effet |
+|---|---|
+| **Auto** *(défaut)* | la carte graphique si elle existe, sinon le processeur |
+| **GPU** | Ollama place le maximum de couches sur la carte et déborde sur la mémoire centrale |
+| **CPU** | tout sur le processeur (`num_gpu: 0`) — lent, mais libère la carte |
+
+« GPU » ne force aucun nombre de couches : Ollama mesure la mémoire libre mieux qu'une
+estimation faite d'avance, et imposer un nombre ferait échouer le chargement d'un modèle
+trop gros. Si le modèle choisi dépasse la mémoire de la carte, Ollook vous le dit et
+suggère un modèle plus petit.
+
+### Le NPU : détecté, mais inutilisable par Ollama
+
+**Ollama n'a aucun moteur NPU.** Ses moteurs sont CPU, CUDA, Metal, ROCm et Vulkan. Ollook
+détecte quand même le NPU et vous l'annonce — avec la pile qu'il faudrait pour l'exploiter —
+plutôt que d'offrir un bouton qui ne changerait rien :
+
+> NPU détecté (Intel(R) AI Boost) mais Ollama ne sait pas s'en servir : il faudrait OpenVINO.
+
+Chaque fabricant impose sa propre pile et des modèles convertis en ONNX, compilés à l'avance :
+**OpenVINO** chez Intel, **QNN/Hexagon** chez Qualcomm, **Ryzen AI** chez AMD.
+
+Si vous voulez vraiment passer par le NPU, la voie est un **serveur tiers compatible avec
+l'API d'Ollama** — par exemple [NoLlama](https://github.com/aweussom/NoLlama), qui s'appuie
+sur OpenVINO pour les NPU Intel. Ollook honore la variable `OLLAMA_HOST` et s'y connectera
+sans modification :
+
+```bash
+set OLLAMA_HOST=http://127.0.0.1:11435
+```
+
+Le jour où Ollama gagnera un moteur NPU, **Auto** le préférera : il suffira d'ajouter `npu`
+à l'ensemble `MOTEURS` dans `ollook_core.py`.
+
+### Petit GPU
+
+Sur une machine à faible mémoire graphique, le plus efficace n'est pas de changer d'unité
+mais **de modèle** : un `qwen3.5:4b` qui tient entièrement dans la carte sera plus rapide
+qu'un `qwen3.5:27b` dont la majeure partie déborde sur le processeur.
+
+---
+
 ## Mises à jour
 
 Ollook **se met à jour tout seul**. Il interroge GitHub au démarrage, télécharge la

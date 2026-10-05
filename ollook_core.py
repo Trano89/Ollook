@@ -620,8 +620,85 @@ def ollama_version():
     return ollama_get("/api/version", timeout=3).get("version", "?")
 
 
+# --------------------------------------------------------------------------
+# Unite de calcul
+#
+# Ollama n'expose qu'un seul levier reel : num_gpu, le nombre de couches du
+# modele deportees sur la carte graphique. A zero, tout tourne sur le
+# processeur. Omis, Ollama place lui-meme le maximum de couches sur la carte et
+# deborde sur la memoire centrale pour le reste -- c'est ce qu'on entend par
+# "GPU", et c'est plus sur que de forcer un nombre, qui ferait echouer le
+# chargement d'un modele trop gros pour la memoire disponible.
+#
+# Il n'existe AUCUN moteur NPU dans Ollama : ses moteurs sont CPU, CUDA, Metal,
+# ROCm et Vulkan. Un NPU present est donc signale a l'utilisateur mais reste
+# inutilisable ; l'offrir comme un choix qui ne changerait rien serait
+# mensonger. MOTEURS enumere ce qu'Ollama sait reellement faire, de sorte que
+# le jour ou un moteur NPU y entrera, "auto" le preferera sans autre
+# modification que cet ensemble.
+# --------------------------------------------------------------------------
+
+MOTEURS = frozenset(("gpu", "cpu"))
+
+UNITES = {
+    "auto": {"label": "Auto", "hint": "le meilleur materiel disponible"},
+    "gpu": {"label": "GPU", "hint": "carte graphique, nettement plus rapide"},
+    "cpu": {"label": "CPU", "hint": "processeur, lent mais toujours disponible"},
+    "npu": {"label": "NPU", "hint": "accelerateur neuronal"},
+}
+
+UNITE_ORDER = ["auto", "gpu", "cpu"]
+DEFAULT_UNITE = "auto"
+
+
+def resoudre_unite(unite, gpu_present=True, npu_present=False):
+    """Unite de calcul reellement employee.
+
+    'auto' prefere le NPU des qu'Ollama saura s'en servir, puis la carte
+    graphique, puis le processeur. Un choix explicite est respecte, sauf s'il
+    designe un materiel qu'Ollama ne pilote pas ou qui est absent."""
+    if unite not in UNITES:
+        unite = DEFAULT_UNITE
+
+    if unite == "auto":
+        if npu_present and "npu" in MOTEURS:
+            return "npu"
+        return "gpu" if gpu_present else "cpu"
+
+    if unite not in MOTEURS:
+        # NPU demande, aucun moteur pour le piloter.
+        return "gpu" if gpu_present else "cpu"
+    if unite == "gpu" and not gpu_present:
+        return "cpu"
+    return unite
+
+
+def options_unite(unite):
+    """Fragment d'options Ollama pour une unite DEJA resolue."""
+    if unite == "cpu":
+        return {"num_gpu": 0}
+    # Rien a imposer : Ollama sature la carte puis deborde de lui-meme, et il
+    # mesure la memoire libre mieux qu'une estimation faite ici.
+    return {}
+
+
+def avis_memoire(vram_go, taille_modele_go):
+    """Avertissement quand le modele ne tient pas dans la carte, sinon None.
+
+    On n'en deduit PAS qu'il faut basculer sur le processeur : le partage de
+    couches decide par Ollama reste generalement meilleur qu'un calcul
+    integralement central. On le signale, et l'utilisateur tranche."""
+    if not vram_go or not taille_modele_go:
+        return None
+    if taille_modele_go <= vram_go * 0.9:
+        return None
+    return ("le modèle (%.1f Go) dépasse la mémoire de la carte (%.1f Go) : "
+            "une partie tournera sur le processeur. Un modèle plus petit sera "
+            "plus rapide." % (taille_modele_go, vram_go))
+
+
 def rewrite_stream(model, draft, context, register, translate,
-                   develop=DEFAULT_DEVELOPMENT):
+                   develop=DEFAULT_DEVELOPMENT, unite=None):
     """Genere des evenements ('thinking', bool), ('delta', str), ('done', str).
 
     Valide strictement ses arguments : c'est le seul point d'entree de la
@@ -634,6 +711,8 @@ def rewrite_stream(model, draft, context, register, translate,
         raise ValueError("niveau de developpement invalide")
     if not isinstance(draft, str) or not draft.strip():
         raise ValueError("message vide")
+    if unite is not None and unite not in MOTEURS:
+        raise ValueError("unite de calcul invalide")
 
     draft = draft[:MAX_DRAFT]
     context = (context or "").strip()
@@ -652,6 +731,11 @@ def rewrite_stream(model, draft, context, register, translate,
             "num_ctx": 8192,
         },
     }
+
+    # L'unite arrive deja resolue : ce module ne sonde pas le materiel,
+    # c'est l'appelant qui l'a mesure.
+    if unite is not None:
+        body["options"].update(options_unite(unite))
 
     # Les modeles a raisonnement perdent du temps a "reflechir" pour une simple
     # relecture. On desactive si le modele le supporte, sinon on filtre le flux.

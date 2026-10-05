@@ -122,7 +122,8 @@ OUTLOOK_PROCESSES = frozenset(("outlook.exe", "olk.exe"))
 
 def load_prefs():
     prefs = {"register": "pro_externe", "model": "", "translate": "0", "scope": "all",
-             "develop": core.DEFAULT_DEVELOPMENT, "maj_auto": "1"}
+             "develop": core.DEFAULT_DEVELOPMENT, "maj_auto": "1",
+             "unite": core.DEFAULT_UNITE}
     try:
         with open(PREFS_PATH, encoding="utf-8") as f:
             for line in f:
@@ -137,6 +138,8 @@ def load_prefs():
         prefs["scope"] = "all"
     if prefs.get("develop") not in core.DEVELOPMENTS:
         prefs["develop"] = core.DEFAULT_DEVELOPMENT
+    if prefs.get("unite") not in core.UNITE_ORDER:
+        prefs["unite"] = core.DEFAULT_UNITE
     return prefs
 
 
@@ -498,6 +501,10 @@ class App(object):
         # Le nouvel Outlook n'accepte aucune frappe synthetique : on n'y
         # capture et n'y remplace rien soi-meme, l'utilisateur copie et colle.
         self.manuel = False
+        # Materiel de calcul, mesure en arriere-plan : la detection
+        # interroge nvidia-smi et PowerShell, trop lent pour l'ouverture.
+        self.materiel = {"gpu": (None, None), "npu": (None, None)}
+        self.tailles = {}          # nom de modele -> octets
         # Signatures reellement configurees dans Outlook classique. Les
         # connaitre rend la frontiere du brouillon exacte.
         self.signatures = outlook.signatures_connues() if outlook else []
@@ -514,6 +521,7 @@ class App(object):
         self._register_own_window()
         self._poll_events()
         self._refresh_models_async()
+        self._detecter_materiel_async()
         self._chercher_maj_async()
 
     def _register_own_window(self):
@@ -617,7 +625,22 @@ class App(object):
                   foreground="#777").pack(anchor="w", pady=(12, 2), **pad)
         self.model = ttk.Combobox(frame, state="readonly", width=40)
         self.model.pack(fill="x", **pad)
-        self.model.bind("<<ComboboxSelected>>", lambda e: self._save())
+        self.model.bind("<<ComboboxSelected>>", lambda e: self._on_modele())
+
+        # Unite de calcul
+        ttk.Label(frame, text="CALCUL", font=("Segoe UI", 8),
+                  foreground="#777").pack(anchor="w", pady=(12, 2), **pad)
+        calc_row = ttk.Frame(frame)
+        calc_row.pack(fill="x", **pad)
+        self.unite = tk.StringVar(value=self.prefs["unite"])
+        for key in core.UNITE_ORDER:
+            ttk.Radiobutton(calc_row, text=core.UNITES[key]["label"], value=key,
+                            variable=self.unite,
+                            command=self._on_unite).pack(side="left", padx=(0, 12))
+        self.calc_hint = ttk.Label(frame, text="détection du matériel…",
+                                   foreground="#777", font=("Segoe UI", 8),
+                                   wraplength=360, justify="left")
+        self.calc_hint.pack(anchor="w", **pad)
 
         # Message d'etat
         self.message = ttk.Label(frame, text="", wraplength=360, justify="left")
@@ -636,6 +659,66 @@ class App(object):
         self.root.bind("<Escape>", lambda e: self.hide())
         self.root.bind("<Return>", lambda e: self.run())
 
+    # ---- unite de calcul -------------------------------------------------
+
+    def _on_unite(self):
+        self._maj_indication_calcul()
+        self._save()
+
+    def unite_resolue(self):
+        """Unite reellement transmise a Ollama."""
+        return core.resoudre_unite(
+            self.unite.get(),
+            gpu_present=bool(self.materiel["gpu"][0]),
+            npu_present=bool(self.materiel["npu"][0]))
+
+    def _detecter_materiel_async(self):
+        threading.Thread(target=self._detecter_materiel, daemon=True).start()
+
+    def _detecter_materiel(self):
+        try:
+            import ollook_setup as setup
+            gpu = setup.detecter_carte()
+            npu = setup.detecter_npu()
+        except Exception:
+            gpu, npu = (None, None), (None, None)
+        self.events.put(("materiel", (gpu, npu)))
+
+    def _maj_indication_calcul(self):
+        """Dit ce qui sera employe, et ce qui ne peut pas l'etre.
+
+        Un NPU detecte est annonce comme inutilisable : Ollama n'a aucun moteur
+        pour le piloter. Le taire laisserait croire que 'Auto' s'en sert."""
+        nom_gpu, vram = self.materiel["gpu"]
+        nom_npu, fabricant = self.materiel["npu"]
+        reelle = self.unite_resolue()
+
+        lignes = []
+        if self.unite.get() == "auto":
+            lignes.append("Auto → %s" % core.UNITES[reelle]["label"])
+
+        if reelle == "gpu" and nom_gpu:
+            lignes.append("%s%s" % (nom_gpu, ", %.0f Go" % vram if vram else ""))
+        elif reelle == "cpu":
+            lignes.append("processeur" if nom_gpu else
+                          "aucune carte graphique détectée")
+
+        texte = " — ".join(lignes) if lignes else core.UNITES[reelle]["hint"]
+
+        if nom_npu:
+            import ollook_setup as setup
+            pile = setup.PILES_NPU.get(fabricant)
+            texte += ("\nNPU détecté (%s) mais Ollama ne sait pas s'en servir%s."
+                      % (nom_npu, " : il faudrait %s" % pile if pile else ""))
+
+        if reelle == "gpu" and vram:
+            octets = self.tailles.get(self.selected_model())
+            avis = core.avis_memoire(vram, octets / 1e9 if octets else None)
+            if avis:
+                texte += "\n" + avis
+
+        self.calc_hint.configure(text=texte)
+
     def _on_develop(self):
         self.develop_hint.configure(
             text=core.DEVELOPMENTS[self.develop.get()]["hint"])
@@ -644,6 +727,7 @@ class App(object):
     def _save(self):
         self.prefs["register"] = self.register.get()
         self.prefs["develop"] = self.develop.get()
+        self.prefs["unite"] = self.unite.get()
         self.prefs["translate"] = "1" if self.translate.get() else "0"
         if self.bridge:
             self.prefs["scope"] = self.scope.get()
@@ -730,11 +814,16 @@ class App(object):
         labels = ["%s  (%s)" % (m["name"], m["parameters"]) if m["parameters"] else m["name"]
                   for m in models]
         self.model_names = [m["name"] for m in models]
+        self.tailles = {m["name"]: m.get("size", 0) for m in models}
         self.model["values"] = labels
 
         want = self.prefs.get("model")
         self.model.current(self.model_names.index(want) if want in self.model_names else 0)
         self.go_btn.state(["!disabled"])
+
+    def _on_modele(self):
+        self._save()
+        self._maj_indication_calcul()
 
     def selected_model(self):
         index = self.model.current()
@@ -882,13 +971,15 @@ class App(object):
 
         threading.Thread(target=self._work, args=(
             model, self.draft, self.context, self.register.get(),
-            self.translate.get(), self.develop.get()), daemon=True).start()
+            self.translate.get(), self.develop.get(),
+            self.unite_resolue()), daemon=True).start()
 
-    def _work(self, model, draft, context, register, translate, develop):
+    def _work(self, model, draft, context, register, translate, develop,
+              unite=None):
         started = time.time()
         try:
             for kind, value in core.rewrite_stream(model, draft, context, register,
-                                                   translate, develop):
+                                                   translate, develop, unite):
                 if kind == "thinking":
                     self.events.put(("thinking", value))
                 elif kind == "done":
@@ -1321,6 +1412,9 @@ class App(object):
                 kind, value = self.events.get_nowait()
                 if kind == "ollama_up":
                     self._apply_models(*value)
+                elif kind == "materiel":
+                    self.materiel["gpu"], self.materiel["npu"] = value
+                    self._maj_indication_calcul()
                 elif kind == "ollama_down":
                     self.status.configure(text="Ollama arrêté", foreground="#b4232b")
                     self.set_message("Ollama ne répond pas. Lancez-le :  ollama serve",
@@ -1510,7 +1604,8 @@ def run_filter():
         out = ""
         for kind, value in core.rewrite_stream(
                 model, draft, context, prefs["register"],
-                prefs.get("translate") == "1", prefs["develop"]):
+                prefs.get("translate") == "1", prefs["develop"],
+                core.resoudre_unite(prefs["unite"])):
             if kind == "done":
                 out = value
 

@@ -613,3 +613,64 @@ def run_setup_ui():
     racine.mainloop()
 
     return resultat["pret"] or ready()
+
+# --------------------------------------------------------------------------
+# Accelerateur neuronal
+#
+# Windows expose les NPU dans la classe de peripheriques ComputeAccelerator.
+# Le filtre par nom couvre les pilotes qui s'en ecartent.
+#
+# Ollama ne sait PAS s'en servir : chaque fabricant impose sa propre pile
+# (OpenVINO chez Intel, QNN chez Qualcomm, Ryzen AI chez AMD) et des modeles
+# convertis en ONNX, compiles a l'avance pour cette pile. On detecte donc le
+# NPU pour pouvoir le dire, pas pour s'en servir.
+# --------------------------------------------------------------------------
+
+_PS_NPU = r"""
+$trouves = @()
+foreach ($d in (Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)) {
+    $nom = $d.FriendlyName
+    if (-not $nom) { continue }
+    if ($d.Class -eq 'ComputeAccelerator' -or
+        $nom -match 'AI Boost|Hexagon|XDNA|Ryzen AI|Neural Processor|NPU Compute') {
+        $trouves += $nom
+    }
+}
+($trouves | Select-Object -Unique) -join '|'
+"""
+
+# Du plus specifique au plus general : "Ryzen AI" avant un simple "AMD".
+_FABRICANTS = (
+    ("intel", ("ai boost", "intel(r) ai", "npu compute accelerator")),
+    ("qualcomm", ("hexagon", "qualcomm", "snapdragon")),
+    ("amd", ("xdna", "ryzen ai")),
+)
+
+# Pile logicielle a employer pour exploiter reellement chaque NPU.
+PILES_NPU = {
+    "intel": "OpenVINO",
+    "qualcomm": "QNN (Hexagon)",
+    "amd": "Ryzen AI",
+}
+
+
+def detecter_npu():
+    """Renvoie (nom, fabricant) du NPU present, ou (None, None).
+
+    `fabricant` vaut 'intel', 'qualcomm', 'amd', ou None si le nom ne permet
+    pas de trancher."""
+    if not WINDOWS:
+        return None, None
+
+    sortie = _sortie_commande(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_NPU])
+    noms = [n.strip() for n in (sortie or "").split("|") if n.strip()]
+    if not noms:
+        return None, None
+
+    nom = noms[0]
+    minuscule = nom.lower()
+    for fabricant, marqueurs in _FABRICANTS:
+        if any(m in minuscule for m in marqueurs):
+            return nom, fabricant
+    return nom, None
